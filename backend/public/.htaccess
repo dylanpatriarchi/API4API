@@ -1,0 +1,14 @@
+# Route every request that does not map to a real file through the front controller.
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteRule ^ index.php [QSA,L]
+</IfModule>
+
+# Never serve the application source, config or dependencies directly.
+<IfModule mod_authz_core.c>
+    <FilesMatch "\.(?!php$)[a-zA-Z0-9]+$">
+        Require all granted
+    </FilesMatch>
+</IfModule>
