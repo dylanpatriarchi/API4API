@@ -1,0 +1,18 @@
+# Dependencies
+/backend/vendor/
+composer.lock
+
+# Local configuration & secrets
+/backend/config/config.php
+/firmware/**/config.h
+
+# PHP tooling caches
+.phpunit.result.cache
+.php-cs-fixer.cache
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
