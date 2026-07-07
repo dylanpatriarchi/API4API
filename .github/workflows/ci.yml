@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  php-lint:
+    name: PHP syntax & composer
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.1', '8.2', '8.3']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP ${{ matrix.php }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          tools: composer:v2
+
+      - name: Syntax-check every PHP file
+        run: |
+          find backend -name '*.php' -print0 \
+            | xargs -0 -n1 -P4 php -l
+
+      - name: Validate composer.json
+        working-directory: backend
+        run: composer validate --no-check-publish --no-check-lock
+
+  code-style:
+    name: PSR-12 code style
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          tools: cs2pr, phpcs
+
+      - name: Run PHP_CodeSniffer
+        working-directory: backend
+        run: phpcs -n -q --report=full
+
+  firmware-guard:
+    name: Firmware secrets guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure config.h is never committed
+        run: |
+          if git ls-files 'firmware/**/config.h' | grep -q .; then
+            echo "::error::A firmware config.h was committed — it must stay local."
+            exit 1
+          fi
+
+      - name: Ensure the config template exists
+        run: test -f firmware/api4api_node/config.example.h
+
+      - name: Ensure no plaintext secrets leaked
+        run: |
+          if grep -rniE 'Franchetti2023|password\s*=\s*"[^"]+"' \
+               firmware --include='*.ino' --include='*.h' \
+               --exclude='config.h'; then
+            echo "::error::Possible hardcoded secret found in firmware."
+            exit 1
+          fi

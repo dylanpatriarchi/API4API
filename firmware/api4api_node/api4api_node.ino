@@ -1,3 +1,10 @@
+// API4API node firmware for ESP32.
+//
+// Reads weight, temperature, humidity and hive-noise sensors, buffers the
+// readings (in RAM, with EEPROM fallback when offline) and POSTs them to the
+// API4API REST backend. Secrets live in config.h — see config.example.h.
+#include "config.h"
+
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <WiFi.h>
@@ -43,30 +50,26 @@ double vImag[samples];
 #define SCL_FREQUENCY 0x02
 #define SCL_PLOT 0x03
 
-//dato da salvare
+// A single sensor reading queued for upload
 struct KeyValue {
-  char sensorType[20];        // Chiave (stringa di max 10 caratteri)
-  char valueType[20];        // Chiave (stringa di max 10 caratteri)
-  float value;           // Valore (intero)
-  unsigned long time;  // Timestamp (unsigned long)
+  char sensorType[20];  // Sensor identifier (max 19 chars)
+  char valueType[20];   // Measured quantity (max 19 chars)
+  float value;          // Measured value
+  unsigned long time;   // UTC timestamp (epoch seconds)
 };
-const int bufferSize = 25;  // Dimensione massima del buffer
-const int bufferStartAddress = 0;  // Indirizzo di partenza nella EEPROM per il buffer
-KeyValue buffer[bufferSize];  // Buffer per i dati json
-int bufferIndex = 0;  // Indice corrente del buffer
-
-#define SERVER_IP ""
+const int bufferSize = 25;          // Maximum number of buffered readings
+const int bufferStartAddress = 0;   // EEPROM start address for the buffer
+KeyValue buffer[bufferSize];        // In-RAM buffer for pending readings
+int bufferIndex = 0;                // Current buffer position
 
 String host = "";
-#define ssid ""
-#define password  ""
 
 unsigned long previousMillis = 0;
 unsigned long interval = 30000;
 
-const char* ntpServer = "pool.ntp.org";
-const long  gmtOffset_sec = 3600;   //Replace with your GMT offset (seconds)
-const int   daylightOffset_sec = 0;  //Replace with your daylight offset (seconds)
+const char* ntpServer = NTP_SERVER;
+const long  gmtOffset_sec = GMT_OFFSET_SEC;
+const int   daylightOffset_sec = DAYLIGHT_OFFSET_SEC;
 
 DynamicJsonDocument doc(1024);
 unsigned long secondsAtNow;
@@ -102,12 +105,12 @@ unsigned long _secondsAtSavingSht12_Humidity=0;
 double lastHumidity=0;
 
 const int numReadings = 500;
-int readings[numReadings]; // array per i valori letti
-int pointer = 0;            // indice corrente dell'array
-int total = 0;            // somma corrente dei valori letti
+int readings[numReadings]; // circular buffer of humidity samples
+int pointer = 0;            // current index into the readings array
+int total = 0;            // running sum of the buffered readings
 int average = 0;  
 
-//webserver per l'update del firmware da pagina web
+// Web server exposing the OTA firmware-update page
 WebServer server(80);
 const char* loginIndex =
  "<form name='loginForm'>"
@@ -140,7 +143,7 @@ const char* loginIndex =
 "<script>"
     "function check(form)"
     "{"
-    "if(form.userid.value=='admin' && form.pwd.value=='Franchetti2023%')"
+    "if(form.userid.value=='" OTA_USERNAME "' && form.pwd.value=='" OTA_PASSWORD "')"
     "{"
     "window.open('/serverIndex')"
     "}"
@@ -192,36 +195,36 @@ const char* serverIndex =
  "});"
  "</script>";
 
-//pulisce la eeprom
+// Clear the EEPROM buffer header
 void freeEEPROM(){
   EEPROM.write(0,0);
   EEPROM.write(1,0);
   EEPROM.commit();
 }
 
-//salva il buffer nella eeprom
+// Persist the RAM buffer into EEPROM
 void saveBufferToEEPROM() {
   EEPROM.write(0,bufferIndex % 256);
   EEPROM.write(1,bufferIndex / 256);
   
-  // Salva il buffer nella EEPROM
+  // Write each buffered reading into EEPROM
   for (int i = 0; i < bufferIndex; i++) {
     EEPROM.put(2 + (i * sizeof(KeyValue)), buffer[i]);
   }
 
-  // Scrivi i dati nella EEPROM
+  // Flush the pending writes to EEPROM
   EEPROM.commit();
   Serial.print("saved ");
   Serial.print(bufferIndex);
   Serial.println(" data on EEPROM");
 }
 
-// Leggi i dati dalla EEPROM e ripopola il buffer
+// Read the buffered readings back from EEPROM
 void readDataFromEEPROM() {
-  bufferIndex = EEPROM.read(0) + (265*EEPROM.read(1));
+  bufferIndex = EEPROM.read(0) + (256 * EEPROM.read(1));
   for (int i = 0; i < bufferSize; i++) {
     EEPROM.get(2 + (i * sizeof(KeyValue)), buffer[i]);
-    // Puoi anche aggiungere qui ulteriori logiche o operazioni sui dati letti
+    // Additional processing on the restored data can go here
   }
 
   Serial.print("found ");
@@ -278,10 +281,10 @@ void setup() {
   Serial.begin(115200);
   unsigned long unconnectedTimes = 0;
 
-  //evita di loggare i dati wifi
+  // Silence the noisy Wi-Fi driver logs
   esp_log_level_set("wifi", ESP_LOG_NONE); 
   WiFi.setAutoReconnect(true);
-  WiFi.begin(ssid, password);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   waitForWiFiConnectOrReboot(true);
 
   //sync con ntpserver
@@ -351,7 +354,7 @@ void setup() {
   EEPROM.begin(512);
   readDataFromEEPROM();
 
-  //inizializza il json con value a 0
+  // Initialise the JSON document with a zero value
   doc["value"] = 0.0f;
 
   ArduinoOTA
@@ -426,7 +429,7 @@ void loop() {
     {
       doc["link"]="";
       doc["sensorType"]="HX711";
-      doc["valueType"]="weigth";
+      doc["valueType"]="weight";
       doc["value"]=average;
       doc["timestampUtc"]=getTime();
       bufferingJson(doc);
@@ -488,10 +491,10 @@ void loop() {
     lastHumidity = average;
   }
 
-  //ripristina la connessione wifi qualora sia giù
+  // Re-establish the Wi-Fi connection if it dropped
   waitForWiFiConnectOrReboot(true);
 
-  //se c'è connessione svuota il buffer ed esegue le post
+  // When online, drain the buffer by POSTing each reading
   if (WiFi.status() == WL_CONNECTED) 
   {
     int retry=5;
@@ -521,15 +524,15 @@ void loop() {
   } 
   else
   {
-    //se non c'è connessione carica il buffer in eeprom
+    // When offline, persist the buffer to EEPROM
     saveBufferToEEPROM();
   }
 }
 
 void bufferingJson(DynamicJsonDocument docu){
   KeyValue newData;
-  snprintf(newData.sensorType, sizeof(newData.sensorType), doc["sensorType"]);
-  snprintf(newData.valueType, sizeof(newData.valueType), doc["valueType"]);
+  snprintf(newData.sensorType, sizeof(newData.sensorType), "%s", (const char*)doc["sensorType"]);
+  snprintf(newData.valueType, sizeof(newData.valueType), "%s", (const char*)doc["valueType"]);
   newData.value = doc["value"];
   newData.time = doc["timestampUtc"];
 
@@ -542,7 +545,7 @@ void bufferingJson(DynamicJsonDocument docu){
   Serial.print("timestamp: ");
   Serial.println(newData.time);
   
-  // Aggiungi la nuova coppia chiave-valore al buffer
+  // Append the new reading to the buffer
   buffer[bufferIndex] = newData;
   bufferIndex++;
 
@@ -563,10 +566,10 @@ bool postJson(DynamicJsonDocument docu){
     http.addHeader("cache-control", "no-cache");
     //http.addHeader("x-apikey", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
 
-    //genera il json
+    // Build the JSON payload
     String output;
-    docu["id_beehive"] = 2;
-    docu["beehive"]["id"] = 2;
+    docu["id_beehive"] = BEEHIVE_ID;
+    docu["beehive"]["id"] = BEEHIVE_ID;
     docu["beehive"]["espMacAddres"] = WiFi.macAddress();
     serializeJson(docu, output);
     
@@ -595,7 +598,7 @@ bool postJson(DynamicJsonDocument docu){
 }
 
 
-//metodi per estrarre frequenza dominante ed intensità dal microfono
+// Helpers extracting the dominant frequency and gain from the microphone
 void PrintVector(double *vData, uint16_t bufferSize, uint8_t scaleType)
 {
   for (uint16_t i = 0; i < bufferSize; i++)
