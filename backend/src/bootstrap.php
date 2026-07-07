@@ -4,12 +4,8 @@ declare(strict_types=1);
 
 use App\Core\Config;
 
-/**
- * Application bootstrap: autoloading and configuration.
- *
- * Returns nothing; on completion the App\ namespace is autoloadable and the
- * configuration is loaded.
- */
+// Application bootstrap: registers autoloading and loads configuration.
+// On completion the App\ namespace is autoloadable and the config is loaded.
 
 $root = dirname(__DIR__);
 
